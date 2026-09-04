@@ -12,7 +12,6 @@ import (
 	"github.com/clipperhouse/uax29/v2/words"
 	"github.com/taigrr/crush/internal/message"
 	"github.com/taigrr/crush/internal/ui/anim"
-	"github.com/taigrr/crush/internal/message"
 	"github.com/taigrr/crush/internal/ui/chat"
 	"github.com/taigrr/crush/internal/ui/common"
 	"github.com/taigrr/crush/internal/ui/list"
