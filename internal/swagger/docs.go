@@ -74,6 +74,25 @@ const docTemplate = `{
                 }
             }
         },
+        "/drain": {
+            "post": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "system"
+                ],
+                "summary": "Drain the server for an update",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Health"
+                        }
+                    }
+                }
+            }
+        },
         "/events": {
             "get": {
                 "produces": [
@@ -92,13 +111,19 @@ const docTemplate = `{
         },
         "/health": {
             "get": {
+                "produces": [
+                    "application/json"
+                ],
                 "tags": [
                     "system"
                 ],
                 "summary": "Health check",
                 "responses": {
                     "200": {
-                        "description": "OK"
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Health"
+                        }
                     }
                 }
             }
@@ -873,6 +898,48 @@ const docTemplate = `{
                 }
             }
         },
+        "/workspaces/{id}/agent/sessions/{sid}/interrupt": {
+            "post": {
+                "description": "Ask the tools running in the session's current step to wrap up early without cancelling them; a running shell command becomes a background job.",
+                "tags": [
+                    "agent"
+                ],
+                "summary": "Soft-interrupt agent session",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Session ID",
+                        "name": "sid",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    }
+                }
+            }
+        },
         "/workspaces/{id}/agent/sessions/{sid}/prompts/clear": {
             "post": {
                 "tags": [
@@ -1145,6 +1212,61 @@ const docTemplate = `{
                     },
                     "404": {
                         "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    }
+                }
+            }
+        },
+        "/workspaces/{id}/agent/sessions/{sid}/tools/{tcid}/background": {
+            "post": {
+                "description": "Ask a single in-flight tool call (e.g. a bash command) to hand its work back as a background job so the turn can continue. 409 if the call is unknown, finished, or cannot be backgrounded.",
+                "tags": [
+                    "agent"
+                ],
+                "summary": "Background a running tool call",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Workspace ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Session ID",
+                        "name": "sid",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Tool call ID",
+                        "name": "tcid",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/proto.Error"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
                         "schema": {
                             "$ref": "#/definitions/proto.Error"
                         }
@@ -5442,6 +5564,10 @@ const docTemplate = `{
                 "session_id": {
                     "type": "string"
                 },
+                "steer": {
+                    "description": "Steer marks a mid-turn steering message. On a busy session the\nprompt is queued as usual and the session's soft interrupt is\nraised so long-running tools that opt in (bash, job_output) wrap\nup early — returning their work as a background job rather than\nbeing cancelled — and the queued prompt is folded into the turn\nat the next step. Combine with an empty RunID to fold rather than\nwait for a dedicated turn. On an idle session it is a normal\nprompt.",
+                    "type": "boolean"
+                },
                 "swarm_parts": {
                     "description": "SwarmParts, when set, replaces the default TextContent user\nmessage with one or more [SwarmMessage] parts. Used by\n[Backend.SwarmSend] so the receiving session records\nstructured sender metadata (color, animal, workspace) instead\nof a plain text prefix. The Prompt field must still be set to\nthe concatenated user-visible text so downstream code that\ntreats prompts as strings (queue drop notifications, run\nlogs) keeps working.",
                     "type": "array",
@@ -5630,6 +5756,10 @@ const docTemplate = `{
         "proto.Error": {
             "type": "object",
             "properties": {
+                "code": {
+                    "description": "Code, when set, identifies the condition machine-readably. See\nthe ErrorCode* constants.",
+                    "type": "string"
+                },
                 "message": {
                     "type": "string"
                 }
@@ -5686,6 +5816,22 @@ const docTemplate = `{
                 },
                 "turns": {
                     "type": "integer"
+                }
+            }
+        },
+        "proto.Health": {
+            "type": "object",
+            "properties": {
+                "active_runs": {
+                    "description": "ActiveRuns is the number of sessions, across all workspaces, with\nan active or accepted-but-not-yet-active agent run. A run blocked\non a permission or question prompt counts.",
+                    "type": "integer"
+                },
+                "draining": {
+                    "description": "Draining is true once the server has been asked to drain for an\nupdate: it finishes in-flight runs but accepts no new ones, and\nexits on its own when ActiveRuns reaches zero.",
+                    "type": "boolean"
+                },
+                "status": {
+                    "type": "string"
                 }
             }
         },
@@ -6276,6 +6422,10 @@ const docTemplate = `{
                 },
                 "platform": {
                     "type": "string"
+                },
+                "protocol_version": {
+                    "description": "ProtocolVersion is the server's [ProtocolVersion]. Servers that\npredate the field report 0.",
+                    "type": "integer"
                 },
                 "version": {
                     "type": "string"

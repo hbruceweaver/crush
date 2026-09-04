@@ -43,6 +43,12 @@ type BashResponseMetadata struct {
 	WorkingDirectory string `json:"working_directory"`
 	Background       bool   `json:"background,omitempty"`
 	ShellID          string `json:"shell_id,omitempty"`
+	// BackgroundReason says why a foreground command ended up as a
+	// background job: "timeout" (auto_background_after elapsed), "steer"
+	// (a user message was waiting) or "user" (backgrounded from the UI).
+	// Empty for commands that ran to completion or were started with
+	// run_in_background.
+	BackgroundReason string `json:"background_reason,omitempty"`
 }
 
 const (
@@ -284,6 +290,7 @@ func NewBashTool(permissions permission.Service, workingDir WorkingDirFunc, attr
 					Background:       true,
 					ShellID:          bgShell.ID,
 				}
+				watchBackgroundJob(ctx, bgShell)
 				response := fmt.Sprintf("Background shell started with ID: %s\n\nUse job_output tool to view output or job_kill to terminate.", bgShell.ID)
 				return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
 			}
@@ -299,17 +306,27 @@ func NewBashTool(permissions permission.Service, workingDir WorkingDirFunc, attr
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("error starting shell: %s", err)), nil
 			}
 
-			// Wait for either completion, auto-background threshold, or context cancellation
+			// Wait for either completion, auto-background threshold, a
+			// background request, or context cancellation. Two things can
+			// move the command to the background early without killing
+			// it: a step-wide soft interrupt (a steer is waiting and the
+			// model should see it now) and a per-call background request
+			// (the user backgrounded this command from the UI). Both
+			// return the same job-id response the auto-background path
+			// does, with a note saying why it happened early.
 			ticker := time.NewTicker(100 * time.Millisecond)
 			defer ticker.Stop()
 
 			autoBackgroundAfter := cmp.Or(params.AutoBackgroundAfter, DefaultAutoBackgroundAfter)
 			autoBackgroundThreshold := time.Duration(autoBackgroundAfter) * time.Second
 			timeout := time.After(autoBackgroundThreshold)
+			bgRequested, releaseBg := RegisterBackgroundable(ctx, call.ID)
+			defer releaseBg()
 
 			var stdout, stderr string
 			var done bool
 			var execErr error
+			var reason backgroundReason
 
 		waitLoop:
 			for {
@@ -320,6 +337,15 @@ func NewBashTool(permissions permission.Service, workingDir WorkingDirFunc, attr
 						break waitLoop
 					}
 				case <-timeout:
+					reason = backgroundReasonTimeout
+					stdout, stderr, done, execErr = bgShell.GetOutput()
+					break waitLoop
+				case <-SoftInterrupt(ctx):
+					reason = backgroundReasonSteer
+					stdout, stderr, done, execErr = bgShell.GetOutput()
+					break waitLoop
+				case <-bgRequested:
+					reason = backgroundReasonUser
 					stdout, stderr, done, execErr = bgShell.GetOutput()
 					break waitLoop
 				case <-ctx.Done():
@@ -367,11 +393,107 @@ func NewBashTool(permissions permission.Service, workingDir WorkingDirFunc, attr
 				WorkingDirectory: bgShell.WorkingDir,
 				Background:       true,
 				ShellID:          bgShell.ID,
+				BackgroundReason: reason.String(),
 			}
-			response := fmt.Sprintf("Command is taking longer than expected and has been moved to background.\n\nBackground shell ID: %s\n\nUse job_output tool to view output or job_kill to terminate.", bgShell.ID)
-			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
+			watchBackgroundJob(ctx, bgShell)
+			return fantasy.WithResponseMetadata(fantasy.NewTextResponse(movedToBackgroundResponse(bgShell.ID, reason)), metadata), nil
 		},
 	)
+}
+
+// backgroundReason says why a foreground command was handed back to the
+// model as a background job.
+type backgroundReason int
+
+const (
+	// backgroundReasonTimeout: the auto_background_after threshold passed.
+	backgroundReasonTimeout backgroundReason = iota
+	// backgroundReasonSteer: a step-wide soft interrupt fired because a
+	// user message is waiting to be folded into the turn.
+	backgroundReasonSteer
+	// backgroundReasonUser: the user backgrounded this specific command.
+	backgroundReasonUser
+)
+
+// String returns the metadata label for the reason.
+func (r backgroundReason) String() string {
+	switch r {
+	case backgroundReasonSteer:
+		return "steer"
+	case backgroundReasonUser:
+		return "user"
+	default:
+		return "timeout"
+	}
+}
+
+// movedToBackgroundResponse is the single tool result used whenever a
+// foreground command keeps running as a background job, whichever path
+// got it there. Only the first line differs so the model learns the same
+// job-id / job_output / job_kill contract in every case.
+func movedToBackgroundResponse(shellID string, reason backgroundReason) string {
+	var lead string
+	switch reason {
+	case backgroundReasonSteer:
+		lead = "Command is still running and has been moved to background early because a user message is waiting for you. Read and act on the user's message first."
+	case backgroundReasonUser:
+		lead = "Command is still running and has been moved to background by the user. Continue with other work; you will be notified when it finishes, so do not poll for it."
+	default:
+		lead = "Command is taking longer than expected and has been moved to background. You will be notified when it finishes."
+	}
+	return fmt.Sprintf("%s\n\nBackground shell ID: %s\n\nUse job_output tool to view output or job_kill to terminate.", lead, shellID)
+}
+
+// jobNotificationOutputLimit caps how much of a finished job's output is
+// folded into the conversation; the model can fetch the rest with
+// job_output.
+const jobNotificationOutputLimit = 4000
+
+// JobFinishedNoticePrefix opens the user-role aside folded into the
+// conversation when a background job completes. The chat UI keys on it
+// to render the message as a system notice instead of a user bubble.
+const JobFinishedNoticePrefix = "[background job finished]"
+
+// watchBackgroundJob waits for a job that stayed in the background to
+// finish and reports the outcome to the session through the notifier on
+// ctx (if any). It captures the notifier and session up front: the tool
+// call's context is long gone by the time the job ends. A job that was
+// killed (job_kill, shutdown) produces no notification — whoever killed
+// it already knows.
+func watchBackgroundJob(ctx context.Context, bgShell *shell.BackgroundShell) {
+	notify := JobNotifier(ctx)
+	if notify == nil {
+		return
+	}
+	sessionID := GetSessionFromContext(ctx)
+	go func() {
+		bgShell.Wait()
+		stdout, stderr, _, execErr := bgShell.GetOutput()
+		if shell.IsInterrupt(execErr) {
+			return
+		}
+		notify(sessionID, jobFinishedNotification(bgShell.ID, bgShell.Description, bgShell.Command, formatOutput(stdout, stderr, execErr)))
+	}()
+}
+
+// jobFinishedNotification renders the aside folded into the conversation
+// when a background job completes. It is persisted verbatim as a user
+// message, so it is phrased to read as a system notice rather than
+// something the user typed.
+func jobFinishedNotification(shellID, description, command, output string) string {
+	label := cmp.Or(description, DefaultBashDescription(command))
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s (job %s)\n", JobFinishedNoticePrefix, label, shellID)
+	fmt.Fprintf(&b, "Command: %s\n", strings.TrimSpace(command))
+	if output == "" {
+		output = BashNoOutput
+	}
+	if len(output) > jobNotificationOutputLimit {
+		output = "…" + output[len(output)-jobNotificationOutputLimit:]
+	}
+	fmt.Fprintf(&b, "\n%s\n", output)
+	b.WriteString("\nThis is an automatic notice that a command you moved to the background has completed. Use the result if it matters for what you are doing, otherwise carry on; the full output stays available via job_output for a while.")
+	return b.String()
 }
 
 // DefaultBashDescription synthesizes a short label for a shell command
