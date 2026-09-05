@@ -71,3 +71,63 @@
 - Build next from this committed tree into a new binary filename, retain the
   old installed binary, atomically rename, then run `update --graceful` with
   no timeout so no active turn is forcibly cancelled.
+
+## 2026-09-05 17:47:10 EDT — Installed; graceful handoff in progress
+
+- `eaa47762` records the pre-install verification journal and is the clean
+  build source. `local/daily` was advanced using an expected-old-value ref
+  update, without checking it out in any other worktree.
+- Built with `CGO_ENABLED=0 GOEXPERIMENT=greenteagc go build -trimpath`,
+  explicit Commit and BuildID set to `eaa47762e567217bacdb9af3b94339aed6236323`.
+  Go build metadata reports `vcs.modified=false`. Binary version:
+  `v0.91.12-0.20260905214136-eaa47762e567`.
+- New binary SHA-256:
+  `36e835df0d62518c4da2c91488b857406b10a793806725fe0488e56972467718`.
+- Built to `/Users/hbruceweaver/go/bin/crush.restore-eaa47762.new`, verified
+  its metadata and checksum, then atomically replaced `/Users/hbruceweaver/go/bin/crush`.
+- Previous binary retained at
+  `/Users/hbruceweaver/.local/share/crush/binary-backups/crush-20260905-0b65e3117618`.
+- Started `crush update --graceful` with no timeout. The old server entered
+  drain mode and is finishing one live turn, which continues to publish
+  tool results. No forced stop or signal has been used.
+- Before handoff, the attached workspace contained 449 sessions and 23,746
+  messages; its queue and reply-obligation tables were empty.
+- All eight pre-existing linked worktrees remain clean and at their original
+  commits. Main checkout remains at `c69269bd` with only `.worktrees/` untracked.
+  Provider configuration checksum is still identical.
+- GitHub check confirms origin's default branch is `feature`; upstream
+  PRs #28 and #29 remain open and #30/#31 remain drafts. No remote writes.
+
+## 2026-09-05 17:47:59 EDT — Handoff and live validation passed
+
+- Graceful update completed: the active turn finished, PID 43049 exited on
+  its own, and new server PID 81629 started at 17:46:55 EDT.
+- `/v1/version` confirms the installed binary and running server match:
+  `v0.91.12-0.20260905214136-eaa47762e567`, commit/build ID
+  `eaa47762e567217bacdb9af3b94339aed6236323`, protocol 2, darwin/arm64.
+  `/v1/health` is healthy and no longer draining; normal work resumed.
+- Live HTTP checks in the disposable workspace all passed:
+  1. Default conversation fork left current files untouched.
+  2. Restore rolled back the tracked file and removed an ordinary extra file,
+     while preserving `.env`, ignored descendants beneath an absent parent,
+     and `.worktrees/probe` content, including its `.git` file.
+  3. Restore created a pinned safety ref, and restoring its commit hash
+     recovered the exact pre-restore tracked/untracked file state.
+- Detached the disposable workspace after verification. No user workspace
+  was restored or forked for testing. The original workspace reconnected.
+- All 449 original session IDs survived. The database now has 450 sessions
+  and 23,790 messages (up from 23,746 as the live turn continued); SQLite
+  `quick_check` returns `ok`. Queue preservation was verified by the race-tested
+  handoff regression; the live queue was empty at the pre-handoff baseline.
+- Provider configuration checksum and installed binary checksum still match
+  the recorded values. Main checkout and all eight prior linked worktrees
+  remain intact. No dependency changes, pushes, or worktree deletions.
+- Durable local evidence copies are in `tmp/restore-integration-evidence/`
+  (ignored). The probe helper and verifier are in `tmp/live-restore-probe/`.
+- `local/daily` intentionally remains at the exact installed build `eaa47762`.
+  The task branch's final journal commit records post-install results; its
+  only difference from daily is this journal. No code remains unintegrated.
+- Remaining optional work: publish the local daily/protection commits after
+  user authorization; clean up the reviewed worktree candidates separately.
+  The older swarm/model branch and the separate Fantasy Anthropic fixes
+  remain untouched.
