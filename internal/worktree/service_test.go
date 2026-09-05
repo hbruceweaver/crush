@@ -34,6 +34,9 @@ func newGitProject(t *testing.T) string {
 	}
 
 	run("init", "-b", "main")
+	run("config", "commit.gpgsign", "false")
+	// Match the application's exclusion of its own workspace state.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".crush/\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("hello\n"), 0o644))
 	run("add", ".")
 	run("commit", "-m", "initial")

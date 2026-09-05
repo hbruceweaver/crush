@@ -659,6 +659,8 @@ func TestE2E_KillingClientASSEDoesNotBreakClientB(t *testing.T) {
 func TestE2E_ShutdownCallbackFiresWhenLastClientLeaves(t *testing.T) {
 	t.Parallel()
 	h := newE2EHarness(t)
+	// Exercise expiry without waiting for the production reconnect grace.
+	h.backend.SetReconnectGrace(50 * time.Millisecond)
 
 	ctxA, cancelA := context.WithCancel(t.Context())
 	ctxB, cancelB := context.WithCancel(t.Context())
