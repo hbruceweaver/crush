@@ -198,6 +198,9 @@ func (r *Repo) CreateSnapshotCtx(ctx context.Context, description string) (strin
 	if r.repo == nil {
 		return "", ErrRepoNotInitialized
 	}
+	if err := r.refreshIgnoreRules(r.workTree); err != nil {
+		return "", err
+	}
 
 	// Build tree from the configured work tree.
 	treeHash, err := r.buildTree(ctx, r.workTree, "")
@@ -335,7 +338,14 @@ func (r *Repo) RestoreSnapshot(commitHash string, targetDir string) error {
 	}
 
 	// Restore files.
-	return r.restoreTree(tree, targetDir, "")
+	// Read the destination's current rules before restoring its .gitignore.
+	// Use a copy so restoring into another directory does not change the
+	// rules used by future snapshots of the configured work tree.
+	targetRepo := *r
+	if err := targetRepo.refreshIgnoreRules(targetDir); err != nil {
+		return err
+	}
+	return targetRepo.restoreTree(tree, targetDir, "")
 }
 
 // Diff returns the diff between two snapshots as a unified diff string.
@@ -642,6 +652,21 @@ func (r *Repo) isIgnored(relPath string, isDir bool) bool {
 	return r.ignorer.Match(pathParts, isDir)
 }
 
+// refreshIgnoreRules picks up changes made since the repository was opened.
+// A failed walk must stop the operation instead of disabling protection.
+func (r *Repo) refreshIgnoreRules(dir string) error {
+	patterns, err := gitignore.ReadPatterns(osfs.New(dir), nil)
+	if err != nil {
+		if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+			r.ignorer = nil
+			return nil
+		}
+		return fmt.Errorf("read ignore rules: %w", err)
+	}
+	r.ignorer = gitignore.NewMatcher(patterns)
+	return nil
+}
+
 // isExcluded checks if a path matches any exclusion pattern.
 func (r *Repo) isExcluded(relPath string) bool {
 	// Normalize path separators for matching.
@@ -686,6 +711,9 @@ func (r *Repo) restoreTree(tree *object.Tree, targetDir string, relPath string) 
 		restored[entry.Name] = struct{}{}
 		targetPath := filepath.Join(targetDir, entry.Name)
 		entryRelPath := filepath.Join(relPath, entry.Name)
+		if r.skipsEntry(entry.Name, entryRelPath, entry.Mode == filemode.Dir) {
+			continue
+		}
 		if err := r.restoreEntry(entry, targetPath, entryRelPath); err != nil {
 			return err
 		}
@@ -778,8 +806,15 @@ func (r *Repo) cleanupExtraneous(targetDir, relPath string, restored map[string]
 			continue // Never captured by a snapshot, so never deleted by one.
 		}
 
-		// Remove file/dir that's not in the snapshot. Ignore errors.
-		_ = os.RemoveAll(filepath.Join(targetDir, name))
+		// Prune directories entry by entry: even an absent parent may
+		// contain ignored files or a nested .git/.crush directory.
+		entryPath := filepath.Join(targetDir, name)
+		if entry.IsDir() {
+			r.cleanupExtraneous(entryPath, entryRelPath, nil)
+		}
+		// Remove only files, symlinks, and now-empty directories. A
+		// directory containing protected entries must remain in place.
+		_ = os.Remove(entryPath)
 	}
 }
 

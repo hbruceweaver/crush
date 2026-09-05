@@ -411,6 +411,87 @@ func TestRestoreSnapshotHonoursGitignore(t *testing.T) {
 	})
 }
 
+func TestRestorePreservesProtectedDescendants(t *testing.T) {
+	t.Parallel()
+	projectDir := newProjectDir(t)
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("*.secret\n"), 0o644))
+	repo, err := checkpoint.InitRepo(projectDir, nil)
+	require.NoError(t, err)
+	hash, err := repo.CreateSnapshot("before directories exist")
+	require.NoError(t, err)
+
+	for _, name := range []string{
+		"new/deep/credentials.secret",
+		"new/node_modules/dependency.js",
+		"new/.git/config",
+		"new/.crush/state",
+		"new/remove.txt",
+		"disposable/deep/remove.txt",
+	} {
+		path := filepath.Join(projectDir, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte(name), 0o644))
+	}
+	require.NoError(t, repo.RestoreSnapshot(hash, projectDir))
+	for _, name := range []string{
+		"new/deep/credentials.secret",
+		"new/node_modules/dependency.js",
+		"new/.git/config",
+		"new/.crush/state",
+	} {
+		content, err := os.ReadFile(filepath.Join(projectDir, name))
+		require.NoError(t, err)
+		require.Equal(t, name, string(content))
+	}
+	require.NoFileExists(t, filepath.Join(projectDir, "new/remove.txt"))
+	require.NoDirExists(t, filepath.Join(projectDir, "disposable"))
+}
+
+func TestRestoreUsesCurrentIgnoreRules(t *testing.T) {
+	t.Parallel()
+	projectDir := newProjectDir(t)
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "main.go"), []byte("baseline"), 0o644))
+	repo, err := checkpoint.InitRepo(projectDir, nil)
+	require.NoError(t, err)
+	hash, err := repo.CreateSnapshot("before ignore rules exist")
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte(".env\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".env"), []byte("preserve"), 0o644))
+	require.NoError(t, repo.RestoreSnapshot(hash, projectDir))
+	content, err := os.ReadFile(filepath.Join(projectDir, ".env"))
+	require.NoError(t, err)
+	require.Equal(t, "preserve", string(content))
+}
+
+func TestSnapshotAndRestoreRespectNewlyIgnoredFile(t *testing.T) {
+	t.Parallel()
+	projectDir := newProjectDir(t)
+	envPath := filepath.Join(projectDir, ".env")
+	require.NoError(t, os.WriteFile(envPath, []byte("old"), 0o644))
+	repo, err := checkpoint.InitRepo(projectDir, nil)
+	require.NoError(t, err)
+	oldHash, err := repo.CreateSnapshot("before ignoring file")
+	require.NoError(t, err)
+
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte(".env\n"), 0o644))
+	require.NoError(t, os.WriteFile(envPath, []byte("preserve"), 0o644))
+	newHash, err := repo.CreateSnapshot("after ignoring file")
+	require.NoError(t, err)
+
+	// New snapshots exclude the newly ignored file, even when exported
+	// to a destination that has no ignore rules of its own.
+	exportDir := filepath.Join(t.TempDir(), "export")
+	require.NoError(t, repo.RestoreSnapshot(newHash, exportDir))
+	require.NoFileExists(t, filepath.Join(exportDir, ".env"))
+
+	// Older snapshots must not overwrite a file that is now ignored.
+	require.NoError(t, repo.RestoreSnapshot(oldHash, projectDir))
+	content, err := os.ReadFile(envPath)
+	require.NoError(t, err)
+	require.Equal(t, "preserve", string(content))
+}
+
 func TestSnapshotRefs(t *testing.T) {
 	t.Parallel()
 
