@@ -157,3 +157,16 @@
 - Started the standard `gh auth refresh --hostname github.com --scopes workflow`
   device authorization and requested the user's approval on GitHub.
   Awaiting that authorization before retrying the remaining atomic push.
+
+## 2026-09-05 17:58:32 EDT — Publication completed
+
+- The user completed GitHub authorization; gh now reports the required
+  `workflow` scope. The remaining atomic push succeeded over HTTPS.
+- Fetched all three origin branches and verified they match the local tips:
+  `local/daily` at `eaa47762`, `fix/restore-honours-gitignore` at `c69269bd`,
+  and `codex/restore-protection-integration` at `df69b3b5` before this final
+  journal-only update. Configured their origin tracking branches.
+- This final journal update is published on the integration branch; daily
+  stays pinned to the installed, tested binary's source commit.
+- No force pushes, default-branch changes, PR changes, worktree deletions,
+  provider changes, or server restarts were needed for publication.
