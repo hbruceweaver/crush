@@ -144,3 +144,16 @@
   then verify the advertised remote tips against the local refs.
 - The default `feature` branch, upstream PRs, installed binary, provider
   configuration, and other worktrees are outside this publication step.
+
+## 2026-09-05 17:56:04 EDT — Original fix published; workflow authorization pending
+
+- GitHub rejected the atomic push because the stored gh OAuth token has
+  `repo`, `read:org`, and `gist` scopes but lacks `workflow`, which is required
+  for the CI changes included in the daily and integration branches. The
+  atomic rejection initially left all three remote branches absent.
+- Pushed the original restore fix separately: remote
+  `fix/restore-honours-gitignore` now matches `c69269bdffbcf322594af9c2566aeafe531d9c5a`.
+  Fetched and configured its origin tracking branch.
+- Started the standard `gh auth refresh --hostname github.com --scopes workflow`
+  device authorization and requested the user's approval on GitHub.
+  Awaiting that authorization before retrying the remaining atomic push.
