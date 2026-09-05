@@ -131,3 +131,16 @@
   user authorization; clean up the reviewed worktree candidates separately.
   The older swarm/model branch and the separate Fantasy Anthropic fixes
   remain untouched.
+
+## 2026-09-05 17:55:10 EDT — Publication authorized
+
+- The user approved pushing this integration to their GitHub fork.
+- Rechecked the clean task worktree and the three local tips. The remote
+  branches do not yet exist in `hbruceweaver/crush`; repository access is ADMIN.
+- Publish `local/daily` at `eaa47762`, the original protection branch
+  `fix/restore-honours-gitignore` at `c69269bd`, and this task's
+  `codex/restore-protection-integration` branch with its final journal.
+- Use one atomic push over HTTPS with gh credentials, disable push signing,
+  then verify the advertised remote tips against the local refs.
+- The default `feature` branch, upstream PRs, installed binary, provider
+  configuration, and other worktrees are outside this publication step.
