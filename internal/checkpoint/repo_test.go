@@ -298,6 +298,119 @@ func TestRestoreSnapshot(t *testing.T) {
 	})
 }
 
+// TestRestoreSnapshotHonoursGitignore pins the invariant that a restore
+// never deletes what a snapshot would not have captured: paths matched by
+// .gitignore are skipped by the snapshot walk, so the cleanup pass that
+// removes extraneous entries must leave them alone as well. Regression
+// test for the 2026-09-05 data loss where restoring into the live project
+// removed every gitignored path (.worktrees/, data/, .env, ...).
+func TestRestoreSnapshotHonoursGitignore(t *testing.T) {
+	t.Parallel()
+
+	t.Run("preserves gitignored paths and still removes extraneous ones", func(t *testing.T) {
+		t.Parallel()
+		projectDir := newProjectDir(t)
+
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("data/\n.env\n.worktrees/\n"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "main.go"), []byte("package main"), 0o644))
+
+		repo, err := checkpoint.InitRepo(projectDir, nil)
+		require.NoError(t, err)
+
+		hash, err := repo.CreateSnapshot("baseline")
+		require.NoError(t, err)
+
+		// Ignored content created after the snapshot: a directory, a
+		// dotfile and a linked-worktree-like tree with its own .git file.
+		dataDir := filepath.Join(projectDir, "data")
+		require.NoError(t, os.MkdirAll(dataDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dataDir, "crawl.db"), []byte("hosts"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".env"), []byte("SECRET=1"), 0o644))
+		wtDir := filepath.Join(projectDir, ".worktrees", "feature")
+		require.NoError(t, os.MkdirAll(wtDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(wtDir, ".git"), []byte("gitdir: ../../.git/worktrees/feature"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(wtDir, "wip.go"), []byte("package wip"), 0o644))
+
+		// A non-ignored extraneous file must still be cleaned up.
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "extra.txt"), []byte("extra"), 0o644))
+
+		require.NoError(t, repo.RestoreSnapshot(hash, projectDir))
+
+		for _, keep := range []string{
+			filepath.Join(dataDir, "crawl.db"),
+			filepath.Join(projectDir, ".env"),
+			filepath.Join(wtDir, ".git"),
+			filepath.Join(wtDir, "wip.go"),
+			filepath.Join(projectDir, "main.go"),
+		} {
+			_, err := os.Stat(keep)
+			require.NoError(t, err, "gitignored/snapshotted path must survive restore: %s", keep)
+		}
+
+		_, err = os.Stat(filepath.Join(projectDir, "extra.txt"))
+		require.True(t, os.IsNotExist(err), "non-ignored extraneous file must be removed")
+	})
+
+	t.Run("honours nested .gitignore scoped to its directory", func(t *testing.T) {
+		t.Parallel()
+		projectDir := newProjectDir(t)
+
+		// Only sub/.gitignore ignores "cache/"; the root has no such rule,
+		// so the pattern applies under sub/ but not at the project root.
+		subDir := filepath.Join(projectDir, "sub")
+		require.NoError(t, os.MkdirAll(subDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(subDir, ".gitignore"), []byte("cache/\n"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(subDir, "lib.go"), []byte("package sub"), 0o644))
+
+		repo, err := checkpoint.InitRepo(projectDir, nil)
+		require.NoError(t, err)
+
+		hash, err := repo.CreateSnapshot("baseline")
+		require.NoError(t, err)
+
+		nestedCache := filepath.Join(subDir, "cache")
+		require.NoError(t, os.MkdirAll(nestedCache, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(nestedCache, "blob"), []byte("x"), 0o644))
+
+		rootCache := filepath.Join(projectDir, "cache")
+		require.NoError(t, os.MkdirAll(rootCache, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(rootCache, "blob"), []byte("y"), 0o644))
+
+		require.NoError(t, repo.RestoreSnapshot(hash, projectDir))
+
+		_, err = os.Stat(filepath.Join(nestedCache, "blob"))
+		require.NoError(t, err, "path ignored by nested .gitignore must survive restore")
+
+		_, err = os.Stat(rootCache)
+		require.True(t, os.IsNotExist(err), "root-level cache/ is not ignored and must be removed")
+	})
+
+	t.Run("gitignored paths already inside the snapshot are untouched", func(t *testing.T) {
+		t.Parallel()
+		projectDir := newProjectDir(t)
+
+		// Ignored files that exist at snapshot time are neither captured
+		// nor, on restore, deleted or overwritten.
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte(".env\n"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".env"), []byte("v1"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "main.go"), []byte("package main"), 0o644))
+
+		repo, err := checkpoint.InitRepo(projectDir, nil)
+		require.NoError(t, err)
+
+		hash, err := repo.CreateSnapshot("baseline")
+		require.NoError(t, err)
+
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, ".env"), []byte("v2"), 0o644))
+
+		require.NoError(t, repo.RestoreSnapshot(hash, projectDir))
+
+		content, err := os.ReadFile(filepath.Join(projectDir, ".env"))
+		require.NoError(t, err)
+		require.Equal(t, "v2", string(content))
+	})
+}
+
 func TestSnapshotRefs(t *testing.T) {
 	t.Parallel()
 

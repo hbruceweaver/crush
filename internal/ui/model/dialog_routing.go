@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/taigrr/crush/internal/config"
+	"github.com/taigrr/crush/internal/fork"
 	"github.com/taigrr/crush/internal/ui/anim"
 	"github.com/taigrr/crush/internal/ui/dialog"
 	"github.com/taigrr/crush/internal/ui/util"
@@ -423,7 +424,13 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		// UI doesn't appear frozen; it's driven by streamed ForkProgress
 		// events and closed on completion.
 		m.dialog.OpenDialog(dialog.NewForkProgress(m.com))
-		cmds = append(cmds, m.forkConversation(msg.SessionID, msg.MessageID, msg.NewSessionTitle, msg.CreateWorktree))
+		cmds = append(cmds, m.forkConversation(fork.ForkParams{
+			SessionID:          msg.SessionID,
+			MessageID:          msg.MessageID,
+			Title:              msg.NewSessionTitle,
+			CreateWorktree:     msg.CreateWorktree,
+			RestoreWorkingTree: msg.RestoreWorkingTree,
+		}))
 	case dialog.ActionOpenMergeWorktreeDialog:
 		m.dialog.CloseDialog(dialog.WorktreesID)
 		if cmd := m.openMergeWorktreeDialog(msg.WorktreeID, msg.WorktreeName); cmd != nil {

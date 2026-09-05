@@ -225,11 +225,14 @@ type (
 		MessageID string
 	}
 	// ActionForkConversation forks the conversation from a specific message.
+	// The working tree is left alone unless CreateWorktree or
+	// RestoreWorkingTree is set.
 	ActionForkConversation struct {
-		SessionID       string
-		MessageID       string
-		NewSessionTitle string
-		CreateWorktree  bool
+		SessionID          string
+		MessageID          string
+		NewSessionTitle    string
+		CreateWorktree     bool
+		RestoreWorkingTree bool
 	}
 )
 

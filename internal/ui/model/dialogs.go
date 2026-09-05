@@ -394,17 +394,14 @@ func (m *UI) openForkDialog(sessionID, messageID string) tea.Cmd {
 	return nil
 }
 
-// forkConversation forks the conversation from a specific message.
-func (m *UI) forkConversation(sessionID, messageID, newTitle string, createWorktree bool) tea.Cmd {
+// forkConversation forks the conversation from a specific message. The
+// working tree is only touched when params opt in (CreateWorktree or
+// RestoreWorkingTree); by default a fork is a pure conversation copy.
+func (m *UI) forkConversation(params fork.ForkParams) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 
-		result, err := m.com.Workspace.ForkConversation(ctx, fork.ForkParams{
-			SessionID:      sessionID,
-			MessageID:      messageID,
-			CreateWorktree: createWorktree,
-			Title:          newTitle,
-		})
+		result, err := m.com.Workspace.ForkConversation(ctx, params)
 		if err != nil {
 			return forkFailedMsg{err: fmt.Errorf("fork failed: %w", err)}
 		}

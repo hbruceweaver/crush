@@ -4837,6 +4837,17 @@ const docTemplate = `{
                 }
             }
         },
+        "config.ConfigInclude": {
+            "type": "object",
+            "properties": {
+                "dir": {
+                    "type": "string"
+                },
+                "path": {
+                    "type": "string"
+                }
+            }
+        },
         "config.EmbeddingConfig": {
             "type": "object",
             "properties": {
@@ -5033,6 +5044,10 @@ const docTemplate = `{
                     "items": {
                         "type": "string"
                     }
+                },
+                "sysadmin": {
+                    "description": "Sysadmin starts every workspace with sysadmin mode on, so the bash\ntool's sysadmin command filter is a no-op from the first turn. The\npalette toggle still works and overrides this for the running\nprocess.",
+                    "type": "boolean"
                 }
             }
         },
@@ -5173,6 +5188,10 @@ const docTemplate = `{
                     "description": "LowBandwidth, when true, swaps the animated spinner for a simple\n\"Generating .\", \"..\", \"...\" cycle, halves the renderer FPS, and\ndisables the session-title reveal animation. Useful over slow\nlinks or when the user wants reduced motion. Toggleable from the\ncommand palette and forced on by the CRUSH_LOW_BANDWIDTH env var.",
                     "type": "boolean"
                 },
+                "sessions_sidebar_pinned": {
+                    "description": "SessionsSidebarPinned keeps the left session navigator open across\nsession switches instead of collapsing it after each activation.\nToggled from the TUI (alt+s, or \"p\" while the navigator is focused)\nand persisted here so the choice survives restarts.",
+                    "type": "boolean"
+                },
                 "sessions_sidebar_width": {
                     "description": "SessionsSidebarWidth is the width in columns of the left session\nnavigator, persisted so a resize survives restarts. Zero means use\nthe built-in default.",
                     "type": "integer"
@@ -5259,6 +5278,10 @@ const docTemplate = `{
                     "description": "MessageID is the message to fork from. The new session will include\nall messages up to and including this one.",
                     "type": "string"
                 },
+                "restoreWorkingTree": {
+                    "description": "RestoreWorkingTree if true, restores the live working directory to the\nfork-point snapshot. This overwrites and prunes files the user (and any\nother session sharing the directory) may be working on, so it is off by\ndefault and ignored when CreateWorktree is set. A pre-restore safety\nsnapshot is always taken first.",
+                    "type": "boolean"
+                },
                 "sessionID": {
                     "description": "SessionID is the source session to fork from.",
                     "type": "string"
@@ -5289,6 +5312,12 @@ const docTemplate = `{
                         "items": {
                             "$ref": "#/definitions/config.HookConfig"
                         }
+                    }
+                },
+                "includes": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/config.ConfigInclude"
                     }
                 },
                 "lsp": {

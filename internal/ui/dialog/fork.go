@@ -17,6 +17,30 @@ const (
 	forkDialogMaxWidth = 60
 )
 
+// forkFilesMode selects what a fork does with the filesystem.
+type forkFilesMode int
+
+const (
+	// forkFilesKeep leaves the working tree untouched (default).
+	forkFilesKeep forkFilesMode = iota
+	// forkFilesWorktree creates an isolated worktree for the fork.
+	forkFilesWorktree
+	// forkFilesRestore restores the live working tree to the fork point.
+	forkFilesRestore
+	forkFilesModeCount
+)
+
+func (m forkFilesMode) label() string {
+	switch m {
+	case forkFilesWorktree:
+		return "New worktree"
+	case forkFilesRestore:
+		return "Restore working tree to this point (overwrites files!)"
+	default:
+		return "Keep as-is"
+	}
+}
+
 // Fork is a dialog for forking a conversation from a specific message.
 type Fork struct {
 	com       *common.Common
@@ -25,7 +49,7 @@ type Fork struct {
 	sessionID string
 	messageID string
 
-	createWorktree bool
+	filesMode forkFilesMode
 
 	keyMap struct {
 		Confirm        key.Binding
@@ -39,10 +63,10 @@ var _ Dialog = (*Fork)(nil)
 // NewFork creates a new Fork dialog.
 func NewFork(com *common.Common, sessionID, messageID, defaultTitle string) *Fork {
 	f := &Fork{
-		com:            com,
-		sessionID:      sessionID,
-		messageID:      messageID,
-		createWorktree: false, // Default: no worktree
+		com:       com,
+		sessionID: sessionID,
+		messageID: messageID,
+		filesMode: forkFilesKeep, // Default: never touch the working tree.
 	}
 
 	help := help.New()
@@ -62,7 +86,7 @@ func NewFork(com *common.Common, sessionID, messageID, defaultTitle string) *For
 	)
 	f.keyMap.ToggleWorktree = key.NewBinding(
 		key.WithKeys("tab"),
-		key.WithHelp("tab", "toggle worktree"),
+		key.WithHelp("tab", "cycle files mode"),
 	)
 	f.keyMap.Close = CloseKey
 
@@ -82,7 +106,7 @@ func (f *Fork) HandleMsg(msg tea.Msg) Action {
 		case key.Matches(msg, f.keyMap.Close):
 			return ActionClose{}
 		case key.Matches(msg, f.keyMap.ToggleWorktree):
-			f.createWorktree = !f.createWorktree
+			f.filesMode = (f.filesMode + 1) % forkFilesModeCount
 			return nil
 		case key.Matches(msg, f.keyMap.Confirm):
 			title := f.input.Value()
@@ -90,10 +114,11 @@ func (f *Fork) HandleMsg(msg tea.Msg) Action {
 				title = "Fork"
 			}
 			return ActionForkConversation{
-				SessionID:       f.sessionID,
-				MessageID:       f.messageID,
-				NewSessionTitle: title,
-				CreateWorktree:  f.createWorktree,
+				SessionID:          f.sessionID,
+				MessageID:          f.messageID,
+				NewSessionTitle:    title,
+				CreateWorktree:     f.filesMode == forkFilesWorktree,
+				RestoreWorkingTree: f.filesMode == forkFilesRestore,
 			}
 		default:
 			var cmd tea.Cmd
@@ -132,14 +157,10 @@ func (f *Fork) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	inputView := t.Dialog.InputPrompt.Render(f.input.View())
 	rc.AddPart(lipgloss.JoinVertical(lipgloss.Left, inputLabel, inputView))
 
-	// Worktree toggle.
-	worktreeStatus := "No"
-	if f.createWorktree {
-		worktreeStatus = "Yes"
-	}
-	worktreeLabel := t.Dialog.SecondaryText.Render("Create worktree:")
-	worktreeValue := t.Dialog.PrimaryText.Render(worktreeStatus + "  (tab to toggle)")
-	rc.AddPart(lipgloss.JoinVertical(lipgloss.Left, worktreeLabel, worktreeValue))
+	// Files mode selector.
+	filesLabel := t.Dialog.SecondaryText.Render("Files:")
+	filesValue := t.Dialog.PrimaryText.Render(f.filesMode.label() + "  (tab to change)")
+	rc.AddPart(lipgloss.JoinVertical(lipgloss.Left, filesLabel, filesValue))
 
 	rc.Help = f.help.View(f)
 

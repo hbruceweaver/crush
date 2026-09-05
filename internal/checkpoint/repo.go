@@ -273,6 +273,44 @@ func (r *Repo) CreateSnapshotRefCtx(ctx context.Context, sessionID, messageID, d
 	return commitHash, nil
 }
 
+// SafetyRefPrefix is the ref namespace under which pre-restore safety
+// snapshots are pinned, e.g. `refs/safety/1757030000000000000`.
+const SafetyRefPrefix = "refs/safety/"
+
+// CreateSafetySnapshotCtx snapshots the work tree immediately before a
+// destructive operation (a restore) and pins the commit under
+// [SafetyRefPrefix] so it stays discoverable and reachable independently of
+// the per-message snapshot refs:
+//
+//	git --git-dir=.crush/git for-each-ref refs/safety
+//
+// Returns the commit hash, which can be passed straight back to
+// [Service.RestoreSnapshot] to undo the operation in one step.
+func (r *Repo) CreateSafetySnapshotCtx(ctx context.Context, description string) (string, error) {
+	commitHash, err := r.CreateSnapshotCtx(ctx, description)
+	if err != nil {
+		return "", err
+	}
+
+	refName := plumbing.ReferenceName(fmt.Sprintf("%s%d", SafetyRefPrefix, time.Now().UnixNano()))
+	ref := plumbing.NewHashReference(refName, plumbing.NewHash(commitHash))
+	if err := r.repo.Storer.SetReference(ref); err != nil {
+		return "", fmt.Errorf("create safety ref: %w", err)
+	}
+
+	return commitHash, nil
+}
+
+// HasCommit reports whether commitHash names a commit object in the
+// snapshot repository.
+func (r *Repo) HasCommit(commitHash string) bool {
+	if r.repo == nil || !plumbing.IsHash(commitHash) {
+		return false
+	}
+	_, err := r.repo.CommitObject(plumbing.NewHash(commitHash))
+	return err == nil
+}
+
 // RestoreSnapshot restores the filesystem to a snapshot.
 func (r *Repo) RestoreSnapshot(commitHash string, targetDir string) error {
 	if r.repo == nil {
@@ -413,22 +451,8 @@ func (r *Repo) buildTree(ctx context.Context, dir string, relPath string) (plumb
 		entryPath := filepath.Join(dir, name)
 		entryRelPath := filepath.Join(relPath, name)
 
-		// Skip .git and .crush directories.
-		if name == ".git" || name == ".crush" {
+		if r.skipsEntry(name, entryRelPath, entry.IsDir()) {
 			continue
-		}
-
-		// Check exclusions.
-		if r.isExcluded(entryRelPath) {
-			continue
-		}
-
-		// Check .gitignore patterns.
-		if r.ignorer != nil {
-			pathParts := strings.Split(filepath.ToSlash(entryRelPath), "/")
-			if r.ignorer.Match(pathParts, entry.IsDir()) {
-				continue
-			}
 		}
 
 		if entry.IsDir() {
@@ -592,6 +616,32 @@ func treeFileMode(m fs.FileMode) filemode.FileMode {
 	}
 }
 
+// skipsEntry reports whether the snapshot walk leaves a directory entry out
+// of the tree: `.git` and `.crush` are never captured, nor is anything
+// matching an [Config.Exclude] pattern or a .gitignore rule. It is the single
+// source of truth shared by [Repo.buildTree] and [Repo.cleanupExtraneous] so
+// that a restore can never delete something a snapshot would not have
+// captured.
+func (r *Repo) skipsEntry(name, relPath string, isDir bool) bool {
+	if name == ".git" || name == ".crush" {
+		return true
+	}
+	if r.isExcluded(relPath) {
+		return true
+	}
+	return r.isIgnored(relPath, isDir)
+}
+
+// isIgnored reports whether relPath matches a .gitignore rule loaded from
+// the work tree (root and nested .gitignore files, plus .git/info/exclude).
+func (r *Repo) isIgnored(relPath string, isDir bool) bool {
+	if r.ignorer == nil {
+		return false
+	}
+	pathParts := strings.Split(filepath.ToSlash(relPath), "/")
+	return r.ignorer.Match(pathParts, isDir)
+}
+
 // isExcluded checks if a path matches any exclusion pattern.
 func (r *Repo) isExcluded(relPath string) bool {
 	// Normalize path separators for matching.
@@ -700,10 +750,17 @@ func (r *Repo) readBlobContent(hash plumbing.Hash) ([]byte, error) {
 	return io.ReadAll(reader)
 }
 
-// cleanupExtraneous removes files in targetDir that are not part of the
-// restored snapshot, skipping .git, .crush, and excluded paths (which are
-// managed separately). Read and removal errors during cleanup are ignored so a
-// best-effort cleanup never fails the restore.
+// cleanupExtraneous removes entries in targetDir that are not part of the
+// restored snapshot.
+//
+// Invariant: a restore never deletes what a snapshot would not have
+// captured. Every entry the snapshot walk skips (.git, .crush, Exclude
+// patterns and .gitignore matches, see [Repo.skipsEntry]) is by definition
+// absent from every snapshot, so its absence from this one says nothing
+// about whether it should exist. Such entries are left untouched; only
+// entries the walk would have captured, yet which are missing from the
+// snapshot, are removed. Read and removal errors during cleanup are ignored
+// so a best-effort cleanup never fails the restore.
 func (r *Repo) cleanupExtraneous(targetDir, relPath string, restored map[string]struct{}) {
 	entries, err := os.ReadDir(targetDir)
 	if err != nil {
@@ -712,16 +769,13 @@ func (r *Repo) cleanupExtraneous(targetDir, relPath string, restored map[string]
 
 	for _, entry := range entries {
 		name := entry.Name()
-		if name == ".git" || name == ".crush" {
-			continue
-		}
 		if _, ok := restored[name]; ok {
 			continue
 		}
 
 		entryRelPath := filepath.Join(relPath, name)
-		if r.isExcluded(entryRelPath) {
-			continue // Don't delete excluded paths.
+		if r.skipsEntry(name, entryRelPath, entry.IsDir()) {
+			continue // Never captured by a snapshot, so never deleted by one.
 		}
 
 		// Remove file/dir that's not in the snapshot. Ignore errors.

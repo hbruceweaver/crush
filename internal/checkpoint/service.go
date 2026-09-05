@@ -20,7 +20,11 @@ type Service interface {
 	// CreateSnapshot creates a snapshot for a user message.
 	CreateSnapshot(ctx context.Context, sessionID, messageID, description string) (*Snapshot, error)
 
-	// RestoreSnapshot restores to a snapshot.
+	// RestoreSnapshot restores the work tree to a snapshot. snapshotID is
+	// normally a snapshot row id; it may also be the commit hash of a
+	// pre-restore safety snapshot (see [Repo.CreateSafetySnapshotCtx]),
+	// which is how a restore is undone. A safety snapshot of the current
+	// tree is always taken first; if that fails, nothing is restored.
 	RestoreSnapshot(ctx context.Context, snapshotID string, targetDir string) error
 
 	// GetSnapshot retrieves a snapshot by ID.
@@ -213,7 +217,7 @@ func (s *service) RestoreSnapshot(ctx context.Context, snapshotID string, target
 		return errors.New("snapshots not enabled")
 	}
 
-	snapshot, err := s.GetSnapshot(ctx, snapshotID)
+	commitHash, err := s.resolveRestoreTarget(ctx, snapshotID)
 	if err != nil {
 		return err
 	}
@@ -222,9 +226,23 @@ func (s *service) RestoreSnapshot(ctx context.Context, snapshotID string, target
 		targetDir = s.repo.ProjectDir()
 	}
 
+	// Restoring overwrites and prunes the live tree, so pin its current
+	// state first. Refuse to proceed without this safety net: a restore
+	// must always be undoable in one step by restoring the returned hash.
+	safetyHash, err := s.repo.CreateSafetySnapshotCtx(ctx,
+		fmt.Sprintf("pre-restore safety snapshot (restoring %s)", snapshotID))
+	if err != nil {
+		return fmt.Errorf("refusing to restore %s: pre-restore safety snapshot failed: %w", snapshotID, err)
+	}
+	slog.Info("Created pre-restore safety snapshot",
+		"restoring", snapshotID,
+		"commit", commitHash,
+		"safety_commit", safetyHash,
+		"target_dir", targetDir)
+
 	// Restore filesystem.
-	if err := s.repo.RestoreSnapshot(snapshot.GitCommitHash, targetDir); err != nil {
-		return fmt.Errorf("restore filesystem: %w", err)
+	if err := s.repo.RestoreSnapshot(commitHash, targetDir); err != nil {
+		return fmt.Errorf("restore filesystem (pre-restore state saved as %s): %w", safetyHash, err)
 	}
 
 	// Run post-restore hooks.
@@ -234,6 +252,21 @@ func (s *service) RestoreSnapshot(ctx context.Context, snapshotID string, target
 	}
 
 	return nil
+}
+
+// resolveRestoreTarget maps a restore request to a commit hash. Snapshot row
+// ids are looked up in the database; a bare commit hash that names a commit
+// in the snapshot repository (a pre-restore safety snapshot) is accepted
+// as-is so an accidental restore can be reverted in one step.
+func (s *service) resolveRestoreTarget(ctx context.Context, snapshotID string) (string, error) {
+	snapshot, err := s.GetSnapshot(ctx, snapshotID)
+	if err == nil {
+		return snapshot.GitCommitHash, nil
+	}
+	if errors.Is(err, ErrSnapshotNotFound) && s.repo.HasCommit(snapshotID) {
+		return snapshotID, nil
+	}
+	return "", err
 }
 
 func (s *service) GetSnapshot(ctx context.Context, snapshotID string) (*Snapshot, error) {

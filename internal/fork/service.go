@@ -1,6 +1,7 @@
 // Package fork provides conversation forking functionality.
-// Forking creates a new session from a specific point in conversation history,
-// optionally restoring the filesystem to that snapshot.
+// Forking creates a new session from a specific point in conversation history.
+// The filesystem is left alone unless the caller explicitly asks for a
+// worktree or for the working tree to be restored to that point.
 package fork
 
 import (
@@ -31,7 +32,8 @@ type Service interface {
 	pubsub.Subscriber[ForkResult]
 
 	// Fork creates a new session forked from a specific message.
-	// If createWorktree is true, also creates a worktree with the snapshot state.
+	// The working tree is never touched unless params opt in via
+	// CreateWorktree (isolated copy) or RestoreWorkingTree (in place).
 	Fork(ctx context.Context, params ForkParams) (*ForkResult, error)
 
 	// GetForkHistory returns all sessions that were forked from a given snapshot.
@@ -83,6 +85,13 @@ type ForkParams struct {
 
 	// WorktreeName is the name for the new worktree. Auto-generated if empty.
 	WorktreeName string
+
+	// RestoreWorkingTree if true, restores the live working directory to the
+	// fork-point snapshot. This overwrites and prunes files the user (and any
+	// other session sharing the directory) may be working on, so it is off by
+	// default and ignored when CreateWorktree is set. A pre-restore safety
+	// snapshot is always taken first.
+	RestoreWorkingTree bool
 
 	// Title is the title for the new session. Auto-generated if empty.
 	Title string
@@ -173,29 +182,13 @@ func (s *service) Fork(ctx context.Context, params ForkParams) (*ForkResult, err
 		}
 		// If no snapshot exists for this message, that's okay - we just won't restore.
 		// This can happen with archived/gc'd conversations.
-		if errors.Is(err, checkpoint.ErrSnapshotNotFound) {
+		if errors.Is(err, checkpoint.ErrSnapshotNotFound) && (params.RestoreWorkingTree || params.CreateWorktree) {
 			slog.Warn("No snapshot found for fork message, filesystem will not be restored",
 				"message_id", params.MessageID)
 		}
 	}
 
-	// Step 2: Snapshot current state as a "stash" before making changes.
-	// This allows us to restore if something goes wrong or if the user wants to undo.
-	var stashSnapshot *checkpoint.Snapshot
-	if s.checkpoints != nil && s.checkpoints.IsEnabled() {
-		// Create a temporary snapshot of current state. We use a synthetic message ID
-		// since this is a pre-fork stash, not tied to a specific message.
-		stash, err := s.checkpoints.CreateSnapshot(ctx, params.SessionID, "pre-fork-stash", "Pre-fork filesystem state")
-		if err != nil {
-			slog.Warn("Failed to create pre-fork stash snapshot", "error", err)
-			// Non-fatal - continue with fork even if stash fails.
-		} else {
-			stashSnapshot = stash
-			_ = stashSnapshot // Stash is created for potential future undo functionality.
-		}
-	}
-
-	// Step 3: Get source session to copy title if needed.
+	// Step 2: Get source session to copy title if needed.
 	sourceSession, err := s.sessions.Get(ctx, params.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("get source session: %w", err)
@@ -207,13 +200,13 @@ func (s *service) Fork(ctx context.Context, params ForkParams) (*ForkResult, err
 		title = fmt.Sprintf("Fork of %s", sourceSession.Title)
 	}
 
-	// Step 4: Create new session.
+	// Step 3: Create new session.
 	newSession, err := s.sessions.Create(ctx, title)
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}
 
-	// Step 5: Copy messages up to (but not including) the specified message.
+	// Step 4: Copy messages up to (but not including) the specified message.
 	// The fork-point message itself is not persisted; its text is returned
 	// as PrefillText so the UI can seed the input bar with it.
 	s.emitProgress(params.SessionID, ForkStageCopyingMessages, 0.35, "")
@@ -224,7 +217,7 @@ func (s *service) Fork(ctx context.Context, params ForkParams) (*ForkResult, err
 		return nil, fmt.Errorf("copy messages: %w", err)
 	}
 
-	// Step 6: Update session with SummaryMessageID if the source had one and it was copied.
+	// Step 5: Update session with SummaryMessageID if the source had one and it was copied.
 	if sourceSession.SummaryMessageID != "" {
 		if newSummaryID, ok := idMapping[sourceSession.SummaryMessageID]; ok {
 			newSession.SummaryMessageID = newSummaryID
@@ -235,7 +228,7 @@ func (s *service) Fork(ctx context.Context, params ForkParams) (*ForkResult, err
 		}
 	}
 
-	// Step 7: Update session with fork reference.
+	// Step 6: Update session with fork reference.
 	if targetSnapshot != nil {
 		if err := s.queries.UpdateSessionForkedFrom(ctx, db.UpdateSessionForkedFromParams{
 			ForkedFromSnapshotID: sql.NullString{String: targetSnapshot.ID, Valid: true},
@@ -252,8 +245,12 @@ func (s *service) Fork(ctx context.Context, params ForkParams) (*ForkResult, err
 		CreatedAt:      time.Now(),
 	}
 
-	// Step 8: Handle worktree creation or filesystem restore.
-	if params.CreateWorktree && s.worktrees != nil && s.worktrees.IsEnabled() {
+	// Step 7: Optionally materialise the fork-point filesystem state. By
+	// default the working tree is left exactly as it is: a fork is a
+	// conversation operation, and the directory may be shared with other
+	// live sessions. Only an explicit opt-in touches disk.
+	switch {
+	case params.CreateWorktree && s.worktrees != nil && s.worktrees.IsEnabled():
 		// Create a worktree with the target snapshot state.
 		s.emitProgress(params.SessionID, ForkStageCreatingWorktree, 0.6, params.WorktreeName)
 		snapshotID := ""
@@ -268,8 +265,15 @@ func (s *service) Fork(ctx context.Context, params ForkParams) (*ForkResult, err
 		} else {
 			result.Worktree = wt
 		}
-	} else if targetSnapshot != nil {
-		// No worktree requested - restore the target snapshot to current directory.
+	case params.CreateWorktree:
+		// Worktrees unavailable. This used to fall through to an in-place
+		// restore of the working directory; never do that implicitly.
+		slog.Warn("Worktree requested for fork but worktrees are disabled; working tree left untouched",
+			"session_id", params.SessionID)
+	case params.RestoreWorkingTree && targetSnapshot != nil:
+		// Explicitly requested: restore the target snapshot into the live
+		// working directory. RestoreSnapshot pins a pre-restore safety
+		// snapshot first, so no separate stash is taken here.
 		s.emitProgress(params.SessionID, ForkStageRestoringSnapshot, 0.6, "")
 		if err := s.checkpoints.RestoreSnapshot(ctx, targetSnapshot.ID, ""); err != nil {
 			slog.Warn("Failed to restore snapshot for fork",

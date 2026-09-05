@@ -101,6 +101,13 @@ definitions:
       max_items:
         type: integer
     type: object
+  config.ConfigInclude:
+    properties:
+      dir:
+        type: string
+      path:
+        type: string
+    type: object
   config.EmbeddingConfig:
     properties:
       dimensions:
@@ -272,6 +279,13 @@ definitions:
         items:
           type: string
         type: array
+      sysadmin:
+        description: |-
+          Sysadmin starts every workspace with sysadmin mode on, so the bash
+          tool's sysadmin command filter is a no-op from the first turn. The
+          palette toggle still works and overrides this for the running
+          process.
+        type: boolean
     type: object
   config.PostCreateHook:
     properties:
@@ -379,6 +393,13 @@ definitions:
           links or when the user wants reduced motion. Toggleable from the
           command palette and forced on by the CRUSH_LOW_BANDWIDTH env var.
         type: boolean
+      sessions_sidebar_pinned:
+        description: |-
+          SessionsSidebarPinned keeps the left session navigator open across
+          session switches instead of collapsing it after each activation.
+          Toggled from the TUI (alt+s, or "p" while the navigator is focused)
+          and persisted here so the choice survives restarts.
+        type: boolean
       sessions_sidebar_width:
         description: |-
           SessionsSidebarWidth is the width in columns of the left session
@@ -449,6 +470,14 @@ definitions:
           MessageID is the message to fork from. The new session will include
           all messages up to and including this one.
         type: string
+      restoreWorkingTree:
+        description: |-
+          RestoreWorkingTree if true, restores the live working directory to the
+          fork-point snapshot. This overwrites and prunes files the user (and any
+          other session sharing the directory) may be working on, so it is off by
+          default and ignored when CreateWorktree is set. A pre-restore safety
+          snapshot is always taken first.
+        type: boolean
       sessionID:
         description: SessionID is the source session to fork from.
         type: string
@@ -472,6 +501,10 @@ definitions:
             $ref: '#/definitions/config.HookConfig'
           type: array
         type: object
+      includes:
+        items:
+          $ref: '#/definitions/config.ConfigInclude'
+        type: array
       lsp:
         $ref: '#/definitions/config.LSPs'
       mcp:
